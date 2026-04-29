@@ -89,8 +89,11 @@ async fn main() {
         let genesis_clone = genesis_hash.clone();
         let my_port = port.clone();
         
+        // 💡 FIX : On clone l'accès à la blockchain pour la donner à la poignée de main
+        let p2p_chain_handshake = Arc::clone(&shared_chain);
+        
         tokio::spawn(async move {
-            network::send_handshake(&target_clone, &my_port, genesis_clone, current_height).await;
+            network::send_handshake(&target_clone, &my_port, genesis_clone, current_height, p2p_chain_handshake).await;
         });
     }
 
