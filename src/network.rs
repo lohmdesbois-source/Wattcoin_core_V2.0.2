@@ -16,6 +16,10 @@ pub enum P2PMessage {
     WhisperTransaction { tx: Transaction },    
     BroadcastTransaction { tx: Transaction },  
     BroadcastOrder { order: Order },
+    
+    // 💡 NOUVEAU : Les messages pour aspirer le Mempool à travers les pare-feux !
+    GetMempool,
+    MempoolSync { txs: Vec<Transaction> },
 }
 
 async fn read_p2p_message(stream: &mut TcpStream) -> Option<P2PMessage> {
@@ -186,7 +190,17 @@ pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<B
                         }
                     },
                     
-                    P2PMessage::BroadcastOrder { order } => {
+                    // 💡 NOUVEAU : Le serveur donne son Mempool quand on lui demande !
+                    P2PMessage::GetMempool => {
+                        let pool = mempool_clone.lock().unwrap().clone();
+                        let envelope = P2PMessage::MempoolSync { txs: pool };
+                        let _ = socket.write_all(serde_json::to_string(&envelope).unwrap().as_bytes()).await;
+                    },
+                    
+                    // On ignore passivement si on le reçoit sans l'avoir demandé
+                    P2PMessage::MempoolSync { .. } => {},
+					
+					P2PMessage::BroadcastOrder { order } => {
                         let mut pool = dex_pool_clone.lock().unwrap();
                         if !pool.iter().any(|o| o.id == order.id) {
                             println!("🌊 [P2P DEX] Ordre reçu du réseau : {} {} WATT", order.order_type, order.amount_flames);
@@ -256,5 +270,32 @@ fn format_peer_address(target: &str) -> String {
         target.to_string() 
     } else {
         format!("127.0.0.1:{}", target) 
+    }
+}
+
+// 💡 NOUVELLE FONCTION : L'aspirateur à Mempool anti-NAT !
+pub async fn pull_mempool(target_peer: &str, mempool: Arc<Mutex<Vec<Transaction>>>) {
+    let address = format_peer_address(target_peer);
+    if let Ok(mut stream) = TcpStream::connect(&address).await {
+        
+        // 1. On demande le Mempool
+        let envelope = P2PMessage::GetMempool;
+        let _ = stream.write_all(serde_json::to_string(&envelope).unwrap().as_bytes()).await;
+
+        // 2. On attend la réponse dans le même tuyau (Le pare-feu laisse passer !)
+        if let Some(P2PMessage::MempoolSync { txs }) = read_p2p_message(&mut stream).await {
+            let mut local_mp = mempool.lock().unwrap();
+            let mut added = 0;
+            
+            for tx in txs {
+                if !local_mp.iter().any(|t| t.kyber_capsule == tx.kyber_capsule) {
+                    local_mp.push(tx);
+                    added += 1;
+                }
+            }
+            if added > 0 {
+                println!("📥 [PULL] {} transaction(s) aspirée(s) depuis le Relais !", added);
+            }
+        }
     }
 }

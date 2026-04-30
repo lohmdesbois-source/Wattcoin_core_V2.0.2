@@ -112,11 +112,17 @@ async fn main() {
 
         println!("\n⛏️  Début de l'extraction pour l'adresse : {}...", miner_address);
         loop {
+            // 💡 FIX NAT MEMPOOL : On aspire le mempool du relais avant de préparer le bloc !
+            if let Some(target) = &peer_target {
+                network::pull_mempool(target, Arc::clone(&mempool)).await;
+            }
+
+            // --- ÉTAPE A : PRÉPARER LE BLOC ---
             let (mut candidate_block, target) = {
                 let mut chain = shared_chain.lock().unwrap();
                 let pending_txs = mempool.lock().unwrap().clone();
                 chain.prepare_block_template(pending_txs, &miner_address)
-            }; 
+            };
 
             let mut mined = false;
 
