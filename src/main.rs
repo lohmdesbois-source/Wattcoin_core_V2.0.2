@@ -140,10 +140,14 @@ async fn main() {
 
             // --- ÉTAPE B : CHERCHER LE HASH ---
             loop {
+                // ... on vérifie toutes les 2000 itérations si le réseau a bougé
                 if candidate_block.header.nonce % 2000 == 0 {
                     let chain = shared_chain.lock().unwrap();
+                    
+                    // 💡 FIX : On vérifie si la chaîne est plus grande OU ÉGALE à notre index
+                    // (Si elle est plus grande, c'est qu'une synchro P2P a eu lieu)
                     if chain.chain.len() as u64 > candidate_block.header.index {
-                        println!("🛑 [ALERTE] Le réseau a trouvé le Bloc {} avant nous ! Annulation.", candidate_block.header.index);
+                        println!("🛑 [ALERTE] Le réseau a été mis à jour pendant notre calcul ! Annulation du minage.");
                         break; 
                     }
                     tokio::task::yield_now().await;
@@ -171,12 +175,14 @@ async fn main() {
             // --- ÉTAPE C : PUBLIER NOTRE VICTOIRE ---
             if mined {
                 let mut chain = shared_chain.lock().unwrap();
-                if chain.chain.len() as u64 == candidate_block.header.index {
+                
+                // 💡 FIX ULTIME : Si la chaîne a changé pendant qu'on trouvait le hash, on ANNULE TOUT !
+                if chain.chain.len() as u64 > candidate_block.header.index {
+                     println!("🗑️ [INFO] Hachage trouvé, mais la chaîne a été synchronisée entre temps. Bloc jeté.");
+                } 
+                else if chain.chain.len() as u64 == candidate_block.header.index {
                     
-                    // 1. Formatage de la date (Grâce à chrono)
                     let date_str = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                    
-                    // 2. Statistiques des transactions
                     let nb_tx = candidate_block.transactions.len();
                     let mut total_fees = 0;
                     
