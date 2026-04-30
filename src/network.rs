@@ -2,7 +2,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
-use rand::Rng; // 🎲 Pour lancer notre dé
+use rand::Rng; 
 use crate::block::Block;
 use crate::blockchain::Blockchain;
 use crate::transaction::Transaction;
@@ -18,25 +18,22 @@ pub enum P2PMessage {
     BroadcastOrder { order: Order },
 }
 
-// 🛡️ NOUVEAU : BOUCLIER ANTI-FRAGMENTATION TCP
-// Cette fonction lit le flux réseau morceau par morceau et recoud le JSON !
 async fn read_p2p_message(stream: &mut TcpStream) -> Option<P2PMessage> {
     let mut json_str = String::new();
-    let mut temp_buf = vec![0; 65536]; // On lit par gros paquets
+    let mut temp_buf = vec![0; 65536]; 
     
     while let Ok(n) = stream.read(&mut temp_buf).await {
-        if n == 0 { break; } // Le voisin a raccroché
+        if n == 0 { break; } 
         json_str.push_str(&String::from_utf8_lossy(&temp_buf[..n]));
-        
-        // On essaie de comprendre le texte. Si ça marche, c'est qu'on a tous les morceaux !
         if let Ok(message) = serde_json::from_str::<P2PMessage>(&json_str) {
             return Some(message);
         }
     }
-    None // Le JSON était illisible ou la connexion a coupé
+    None 
 }
 
-pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<Blockchain>>, mempool: Arc<Mutex<Vec<Transaction>>>, dex_pool: SharedPool) {
+// 💡 FIX : On ajoute known_peers dans les paramètres
+pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<Blockchain>>, mempool: Arc<Mutex<Vec<Transaction>>>, dex_pool: SharedPool, known_peers: crate::SharedPeers) {
     let address = format!("{}:{}", host_ip, port);
     let listener = TcpListener::bind(&address).await.unwrap();
     println!("📡 Serveur P2P à l'écoute sur TCP/{} (IP: {})...", port, host_ip);
@@ -44,18 +41,24 @@ pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<B
     let my_port = port.to_string(); 
 
     loop {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        // 💡 NOUVEAU : On récupère l'IP réelle de la personne qui se connecte
+        let (mut socket, peer_addr) = listener.accept().await.unwrap();
+        let peer_ip = peer_addr.ip().to_string();
+        
         let blockchain_clone = Arc::clone(&blockchain);
         let mempool_clone = Arc::clone(&mempool); 
         let dex_pool_clone = Arc::clone(&dex_pool);
+        let peers_clone = Arc::clone(&known_peers);
         let my_port_clone = my_port.clone();
 
         tokio::spawn(async move {
-            // 💡 FIX : On remplace le vieux `socket.read` par notre bouclier robuste
             if let Some(message) = read_p2p_message(&mut socket).await {
                 match message {
-                    // 🤝 GESTION DU HANDSHAKE
                     P2PMessage::Handshake { genesis_hash, current_height, sender_port } => {
+                        // 📖 On enregistre ce nouveau contact dans notre carnet !
+                        let full_addr = format!("{}:{}", peer_ip, sender_port);
+                        peers_clone.lock().unwrap().insert(full_addr);
+
                         let (is_behind, blocks_to_send) = {
                             let chain = blockchain_clone.lock().unwrap(); 
                             let my_genesis = &chain.chain[0].header.hash;
@@ -83,7 +86,6 @@ pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<B
                         }
                     },
                     
-                    // 📥 RÉCEPTION DE SYNCHRONISATION
                     P2PMessage::SyncResponse { blocks } => {
                         let mut chain = blockchain_clone.lock().unwrap(); 
                         println!("📦 [P2P] Réception d'une synchronisation massive ({} blocs) !", blocks.len());
@@ -99,7 +101,6 @@ pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<B
                                 println!("❌ Chaîne massive rejetée par le Juge (Invalide).");
                             }
                         } else if new_work == my_work && blocks.len() > 0 && chain.chain.len() > 0 {
-                            // 💡 NOUVEAU FIX : Égalité parfaite de poids ! On départage avec le chronomètre.
                             let my_last_time = chain.chain.last().unwrap().header.timestamp;
                             let new_last_time = blocks.last().unwrap().header.timestamp;
                             
@@ -118,8 +119,11 @@ pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<B
                         }
                     },
 
-                    // 🧱 RÉCEPTION D'UN BLOC EN DIRECT
-                    P2PMessage::NewBlock { block, sender_port: _ } => {
+                    P2PMessage::NewBlock { block, sender_port } => {
+                        // 📖 On enregistre ce mineur dans notre carnet !
+                        let full_addr = format!("{}:{}", peer_ip, sender_port);
+                        peers_clone.lock().unwrap().insert(full_addr);
+
                         let (needs_sync, my_genesis, my_height, process_block) = {
                             let chain = blockchain_clone.lock().unwrap(); 
                             let my_height = chain.chain.len() as u64;
@@ -136,7 +140,6 @@ pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<B
                             
                             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                             
-                            // 💡 FIX : Bouclier anti-fragmentation pour la réponse aussi
                             if let Some(P2PMessage::SyncResponse { blocks }) = read_p2p_message(&mut socket).await {
                                 println!("📦 [P2P] Réception de la chaîne de rattrapage ({} blocs) !", blocks.len());
                                 let mut chain = blockchain_clone.lock().unwrap(); 
@@ -161,7 +164,6 @@ pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<B
                         }
                     },
 
-                    // 🤫 RÉCEPTION D'UN CHUCHOTEMENT DANDELION
                     P2PMessage::WhisperTransaction { tx } => {
                         let mut rng = rand::thread_rng();
                         let dice_roll = rng.gen_range(1..=10); 
@@ -174,18 +176,16 @@ pub async fn start_p2p_server(host_ip: &str, port: &str, blockchain: Arc<Mutex<B
                         }
                     },
 
-                    // 📢 RÉCEPTION D'UN CRI PUBLIC DANDELION
                     P2PMessage::BroadcastTransaction { tx } => {
                         if tx.is_valid() {
                             let mut pool = mempool_clone.lock().unwrap();
                             if !pool.iter().any(|t| t.dilithium_signature == tx.dilithium_signature) {
-                                println!("📥 [MEMPOOL] Nouvelle transaction publique ajoutée.");
+                                println!("📥 [MEMPOOL] Nouvelle transaction publique reçue du réseau !");
                                 pool.push(tx.clone());
                             }
                         }
                     },
                     
-                    // 🌊 RÉCEPTION D'UN ORDRE DEX DU RÉSEAU P2P
                     P2PMessage::BroadcastOrder { order } => {
                         let mut pool = dex_pool_clone.lock().unwrap();
                         if !pool.iter().any(|o| o.id == order.id) {
@@ -207,7 +207,6 @@ pub async fn broadcast_block(target_peer: &str, my_port: &str, block: Block, blo
         let envelope = P2PMessage::NewBlock { block, sender_port: my_port.to_string() };
         let _ = stream.write_all(serde_json::to_string(&envelope).unwrap().as_bytes()).await;
 
-        // 💡 FIX : Bouclier anti-fragmentation
         if let Some(P2PMessage::Handshake { current_height, .. }) = read_p2p_message(&mut stream).await {
             println!("📡 [NAT] Le serveur est en retard (Hauteur: {}). Envoi de la blockchain complète...", current_height);
             let blocks_to_send = {
@@ -226,7 +225,6 @@ pub async fn send_handshake(target_peer: &str, my_port: &str, genesis_hash: Stri
         let envelope = P2PMessage::Handshake { genesis_hash, current_height, sender_port: my_port.to_string() };
         let _ = stream.write_all(serde_json::to_string(&envelope).unwrap().as_bytes()).await;
 
-        // 💡 FIX : Bouclier anti-fragmentation
         if let Some(P2PMessage::SyncResponse { blocks }) = read_p2p_message(&mut stream).await {
             println!("📦 [P2P] Réception de l'historique au démarrage ({} blocs) !", blocks.len());
             let mut chain = blockchain.lock().unwrap();
