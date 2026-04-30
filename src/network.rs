@@ -301,22 +301,25 @@ fn format_peer_address(target: &str) -> String {
     }
 }
 
-// 💡 NOUVELLE FONCTION : L'aspirateur à Mempool anti-NAT !
-pub async fn pull_mempool(target_peer: &str, mempool: Arc<Mutex<Vec<Transaction>>>) {
+// 💡 MODIFICATION : On ajoute l'accès à la blockchain pour vérifier le registre noir
+pub async fn pull_mempool(target_peer: &str, mempool: Arc<Mutex<Vec<Transaction>>>, blockchain: Arc<Mutex<Blockchain>>) {
     let address = format_peer_address(target_peer);
     if let Ok(mut stream) = TcpStream::connect(&address).await {
         
-        // 1. On demande le Mempool
         let envelope = P2PMessage::GetMempool;
         let _ = stream.write_all(serde_json::to_string(&envelope).unwrap().as_bytes()).await;
 
-        // 2. On attend la réponse dans le même tuyau (Le pare-feu laisse passer !)
         if let Some(P2PMessage::MempoolSync { txs }) = read_p2p_message(&mut stream).await {
             let mut local_mp = mempool.lock().unwrap();
+            let chain = blockchain.lock().unwrap(); // 🔒 On regarde le registre de la blockchain
+            
             let mut added = 0;
             
             for tx in txs {
-                if !local_mp.iter().any(|t| t.kyber_capsule == tx.kyber_capsule) {
+                // 💡 FIX : On ne télécharge PAS si elle est déjà dans le mempool OU déjà dépensée !
+                if !local_mp.iter().any(|t| t.kyber_capsule == tx.kyber_capsule) 
+                   && !chain.spent_key_images.contains(&tx.kyber_capsule) 
+                {
                     local_mp.push(tx);
                     added += 1;
                 }

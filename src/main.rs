@@ -112,9 +112,9 @@ async fn main() {
 
         println!("\n⛏️  Début de l'extraction pour l'adresse : {}...", miner_address);
         loop {
-            // 💡 FIX NAT MEMPOOL : On aspire le mempool du relais avant de préparer le bloc !
+            // 💡 FIX : On passe aussi `shared_chain` pour que l'aspirateur puisse lire le registre noir
             if let Some(target) = &peer_target {
-                network::pull_mempool(target, Arc::clone(&mempool)).await;
+                network::pull_mempool(target, Arc::clone(&mempool), Arc::clone(&shared_chain)).await;
             }
 
             // --- ÉTAPE A : PRÉPARER LE BLOC ---
